@@ -25,11 +25,6 @@ contract Pool is IPool {
     /// @inheritdoc IPool
     uint24 public immutable override fee;
     /// @inheritdoc IPool
-    int24 public immutable override tickLower;
-    /// @inheritdoc IPool
-    int24 public immutable override tickUpper;
-
-    /// @inheritdoc IPool
     uint160 public override sqrtPriceX96;
     /// @inheritdoc IPool
     int24 public override tick;
@@ -44,6 +39,10 @@ contract Pool is IPool {
     struct Position {
         // 该 Position 拥有的流动性
         uint128 liquidity;
+        // 价格区间下界
+        int24 tickLower;
+        // 价格区间上界
+        int24 tickUpper;
         // 可提取的 token0 数量
         uint128 tokensOwed0;
         // 可提取的 token1 数量
@@ -59,6 +58,8 @@ contract Pool is IPool {
         address owner;
         // any change in liquidity
         int128 liquidityDelta;
+        int24 tickLower;
+        int24 tickUpper;
     }
 
     // 交易中需要临时存储的变量
@@ -79,17 +80,31 @@ contract Pool is IPool {
         uint256 feeAmount;
     }
 
+    struct TickInfo {
+        uint128 liquidityGross; // 该 tick 上的总流动性
+        int128 liquidityNet; // 当价格穿过该 tick 时的流动性净变化
+        uint256 feeGrowthOutside0X128; // 该 tick 外部的 token0 手续费
+        uint256 feeGrowthOutside1X128; // 该 tick 外部的 token1 手续费
+    }
+
+    // tick 位图（每 256 个 tick 一个 word）
+    mapping(int16 => uint256) public tickBitmap;
+
+    // tick 详细信息存储
+    mapping(int24 => TickInfo) public ticks;
+
     // 用一个 mapping 来存放所有 Position 的信息
-    mapping(address => Position) public positions;
+    mapping(bytes32 => Position) public positions;
 
     constructor() {
         // constructor 中初始化 immutable 的常量
         // Factory 创建 Pool 时会通 new Pool{salt: salt}() 的方式创建 Pool 合约，通过 salt 指定 Pool 的地址，这样其他地方也可以推算出 Pool 的地址
         // 参数通过读取 Factory 合约的 parameters 获取
         // 不通过构造函数传入，因为 CREATE2 会根据 initcode 计算出新地址（new_address = hash(0xFF, sender, salt, bytecode)），带上参数就不能计算出稳定的地址了
-        (factory, token0, token1, tickLower, tickUpper, fee) = IFactory(
-            msg.sender
-        ).parameters();
+        (factory, token0, token1, fee) = IFactory(msg.sender).parameters();
+        // 初始化 tick 边界
+        _flipTick(TickMath.MIN_TICK);
+        _flipTick(TickMath.MAX_TICK);
     }
 
     function initialize(uint160 sqrtPriceX96_) external override {
@@ -97,40 +112,31 @@ contract Pool is IPool {
         sqrtPriceX96 = sqrtPriceX96_;
     }
 
-    function getPosition(
-        address owner
-    )
-        external
-        view
-        override
-        returns (
-            uint128 _liquidity,
-            uint256 feeGrowthInside0LastX128,
-            uint256 feeGrowthInside1LastX128,
-            uint128 tokensOwed0,
-            uint128 tokensOwed1
-        )
-    {
-        return (
-            positions[owner].liquidity,
-            positions[owner].feeGrowthInside0LastX128,
-            positions[owner].feeGrowthInside1LastX128,
-            positions[owner].tokensOwed0,
-            positions[owner].tokensOwed1
-        );
+    function positionId(
+        address owner,
+        int24 tickLower,
+        int24 tickUpper
+    ) public pure returns (bytes32) {
+        require(tickLower < tickUpper, "INVALID_TICK_RANGE");
+        return keccak256(abi.encodePacked(owner, tickLower, tickUpper));
     }
 
     function mint(
         address recipient,
         uint128 amount,
+        int24 tickLower,
+        int24 tickUpper,
         bytes calldata data
     ) external override returns (uint256 amount0, uint256 amount1) {
         require(amount > 0, "Mint amount must be greater than 0");
+        require(tickLower < tickUpper, "INVALID_TICK_RANGE");
         // 基于 amount 计算出当前需要多少 amount0 和 amount1
         (int256 amount0Int, int256 amount1Int) = _modifyPosition(
             ModifyPositionParams({
                 owner: recipient,
-                liquidityDelta: int128(amount)
+                liquidityDelta: int128(amount),
+                tickLower: tickLower,
+                tickUpper: tickUpper
             })
         );
 
@@ -156,11 +162,15 @@ contract Pool is IPool {
 
     function collect(
         address recipient,
+        int24 tickLower,
+        int24 tickUpper,
         uint128 amount0Requested,
         uint128 amount1Requested
     ) external override returns (uint128 amount0, uint128 amount1) {
+        require(tickLower < tickUpper, "INVALID_TICK_RANGE");
         // 获取当前用户的 position
-        Position storage position = positions[msg.sender];
+        bytes32 pid = positionId(msg.sender, tickLower, tickUpper);
+        Position storage position = positions[pid];
         // 把钱退给用户 recipient
         // 修改 position 中的信息
         amount0 = amount0Requested > position.tokensOwed0
@@ -183,18 +193,24 @@ contract Pool is IPool {
     }
 
     function burn(
-        uint128 amount
+        uint128 amount,
+        int24 tickLower,
+        int24 tickUpper
     ) external override returns (uint256 amount0, uint256 amount1) {
         require(amount > 0, "Burn amount must be greater than 0");
+        require(tickLower < tickUpper, "INVALID_TICK_RANGE");
+        bytes32 pid = positionId(msg.sender, tickLower, tickUpper);
         require(
-            amount <= positions[msg.sender].liquidity,
+            amount <= positions[pid].liquidity,
             "Burn amount exceeds liquidity"
         );
         // 修改 positions 中的信息
         (int256 amount0Int, int256 amount1Int) = _modifyPosition(
             ModifyPositionParams({
                 owner: msg.sender,
-                liquidityDelta: -int128(amount)
+                liquidityDelta: -int128(amount),
+                tickLower: tickLower, // 补充参数
+                tickUpper: tickUpper // 补充参数
             })
         );
         // 获取燃烧后的 amount0 和 amount1
@@ -202,13 +218,8 @@ contract Pool is IPool {
         amount1 = uint256(-amount1Int);
 
         if (amount0 > 0 || amount1 > 0) {
-            (
-                positions[msg.sender].tokensOwed0,
-                positions[msg.sender].tokensOwed1
-            ) = (
-                positions[msg.sender].tokensOwed0 + uint128(amount0),
-                positions[msg.sender].tokensOwed1 + uint128(amount1)
-            );
+            positions[pid].tokensOwed0 += uint128(amount0); // 修复行
+            positions[pid].tokensOwed1 += uint128(amount1); // 修复行
         }
 
         emit Burn(msg.sender, amount, amount0, amount1);
@@ -246,33 +257,80 @@ contract Pool is IPool {
             feeAmount: 0
         });
 
-        // 计算交易的上下限，基于 tick 计算价格
-        uint160 sqrtPriceX96Lower = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtPriceX96Upper = TickMath.getSqrtPriceAtTick(tickUpper);
-        // 计算用户交易价格的限制，如果是 zeroForOne 是 true，说明用户会换入 token0，会压低 token0 的价格（也就是池子的价格），所以要限制最低价格不能超过 sqrtPriceX96Lower
-        uint160 sqrtPriceX96PoolLimit = zeroForOne
-            ? sqrtPriceX96Lower
-            : sqrtPriceX96Upper;
-
-        // 计算交易的具体数值
-        (
-            state.sqrtPriceX96,
-            state.amountIn,
-            state.amountOut,
-            state.feeAmount
-        ) = SwapMath.computeSwapStep(
-            sqrtPriceX96,
+        // 主循环：处理每个价格区间
+        while (
+            state.amountSpecifiedRemaining != 0 &&
             (
                 zeroForOne
-                    ? sqrtPriceX96PoolLimit < sqrtPriceLimitX96
-                    : sqrtPriceX96PoolLimit > sqrtPriceLimitX96
+                    ? state.sqrtPriceX96 > sqrtPriceLimitX96
+                    : state.sqrtPriceX96 < sqrtPriceLimitX96
             )
-                ? sqrtPriceLimitX96
-                : sqrtPriceX96PoolLimit,
-            liquidity,
-            amountSpecified,
-            fee
-        );
+        ) {
+            // 使用位图查找下一个有流动性的 tick
+            int24 nextTick = _nextInitializedTick(zeroForOne);
+            uint160 nextSqrtPriceX96 = TickMath.getSqrtPriceAtTick(nextTick);
+
+            // 计算目标价格（不超过限制）
+            uint160 targetSqrtPriceX96 = zeroForOne
+                ? (
+                    nextSqrtPriceX96 < sqrtPriceLimitX96
+                        ? nextSqrtPriceX96
+                        : sqrtPriceLimitX96
+                )
+                : (
+                    nextSqrtPriceX96 > sqrtPriceLimitX96
+                        ? nextSqrtPriceX96
+                        : sqrtPriceLimitX96
+                );
+
+            // 计算交易步骤
+            (
+                uint160 newSqrtPriceX96,
+                uint256 stepAmountIn,
+                uint256 stepAmountOut,
+                uint256 stepFeeAmount
+            ) = SwapMath.computeSwapStep(
+                    state.sqrtPriceX96,
+                    targetSqrtPriceX96,
+                    liquidity,
+                    state.amountSpecifiedRemaining,
+                    fee
+                );
+
+            // 更新状态
+            state.sqrtPriceX96 = newSqrtPriceX96;
+            state.amountIn += stepAmountIn;
+            state.amountOut += stepAmountOut;
+            state.feeAmount += stepFeeAmount;
+
+            if (exactInput) {
+                state.amountSpecifiedRemaining -= (stepAmountIn + stepFeeAmount)
+                    .toInt256();
+                state.amountCalculated -= stepAmountOut.toInt256();
+            } else {
+                state.amountSpecifiedRemaining += stepAmountOut.toInt256();
+                state.amountCalculated += (stepAmountIn + stepFeeAmount)
+                    .toInt256();
+            }
+
+            // 更新手续费
+            state.feeGrowthGlobalX128 += FullMath.mulDiv(
+                stepFeeAmount,
+                FixedPoint128.Q128,
+                liquidity
+            );
+
+            // 如果到达 tick 边界，更新流动性
+            if (state.sqrtPriceX96 == nextSqrtPriceX96) {
+                TickInfo storage nextTickInfo = ticks[nextTick];
+                liquidity = LiquidityMath.addDelta(
+                    liquidity,
+                    zeroForOne
+                        ? nextTickInfo.liquidityNet
+                        : -nextTickInfo.liquidityNet
+                );
+            }
+        }
 
         // 更新新的价格
         sqrtPriceX96 = state.sqrtPriceX96;
@@ -355,6 +413,104 @@ contract Pool is IPool {
         );
     }
 
+    function _nextInitializedTick(
+        bool zeroForOne
+    ) private view returns (int24 next) {
+        int24 currentTick = tick;
+
+        if (zeroForOne) {
+            // 向下查找：从当前 tick 开始向左
+            (int16 wordPos, uint8 bitPos) = _position(currentTick);
+            uint256 mask = (1 << bitPos) - 1; // 当前位左侧的位
+
+            // 在当前 word 中查找
+            uint256 masked = tickBitmap[wordPos] & mask;
+            if (masked != 0) {
+                next = _nextTickInWord(masked, wordPos, true);
+                return next;
+            }
+
+            // 在左侧 word 中查找
+            while (wordPos-- > type(int16).min) {
+                masked = tickBitmap[wordPos];
+                if (masked != 0) {
+                    next = _nextTickInWord(masked, wordPos, true);
+                    return next;
+                }
+            }
+        } else {
+            // 向上查找：从当前 tick 开始向右
+            (int16 wordPos, uint8 bitPos) = _position(currentTick);
+            uint256 mask = ~((1 << bitPos) - 1); // 当前位右侧的位
+
+            // 在当前 word 中查找
+            uint256 masked = tickBitmap[wordPos] & mask;
+            if (masked != 0) {
+                next = _nextTickInWord(masked, wordPos, false);
+                return next;
+            }
+
+            // 在右侧 word 中查找
+            while (wordPos++ < type(int16).max) {
+                masked = tickBitmap[wordPos];
+                if (masked != 0) {
+                    next = _nextTickInWord(masked, wordPos, false);
+                    return next;
+                }
+            }
+        }
+
+        // 未找到，返回边界值
+        return zeroForOne ? TickMath.MIN_TICK : TickMath.MAX_TICK;
+    }
+
+    // ===== 辅助函数 =====
+    function _position(
+        int24 _tick
+    ) private pure returns (int16 wordPos, uint8 bitPos) {
+        wordPos = int16(_tick >> 8);
+        // 修复: 先转为 uint24 再取低 8 位
+        bitPos = uint8(uint24(_tick) & 0xFF);
+    }
+
+    function _nextTickInWord(
+        uint256 word,
+        int16 wordPos,
+        bool lte
+    ) private pure returns (int24 next) {
+        if (lte) {
+            // 最右侧的 1 位（向下查找）
+            uint8 bitPos = _mostSignificantBit(word);
+            // 修复：添加 uint24 中间转换
+            next = (int24(wordPos) << 8) | int24(uint24(bitPos));
+        } else {
+            // 最左侧的 1 位（向上查找）
+            uint8 bitPos = _leastSignificantBit(word);
+            // 修复：添加 uint24 中间转换
+            next = (int24(wordPos) << 8) | int24(uint24(bitPos));
+        }
+    }
+
+    // 查找最右侧的 1 位（MSB）
+    function _mostSignificantBit(uint256 x) private pure returns (uint8 r) {
+        require(x > 0);
+        if (x >= 0x100000000000000000000000000000000) {
+            x >>= 128;
+            r += 128;
+        }
+        // ... 类似 Uniswap 的位操作实现 ...
+    }
+
+    // 查找最左侧的 1 位（LSB）
+    function _leastSignificantBit(uint256 x) private pure returns (uint8 r) {
+        require(x > 0);
+        if (x & 0xffffffffffffffffffffffffffffffff == 0) {
+            x >>= 128;
+            r += 128;
+        }
+        // ... 类似 Uniswap 的位操作实现 ...
+    }
+
     /// @dev Get the pool's balance of token0
     /// @dev This function is gas optimized to avoid a redundant extcodesize check in addition to the returndatasize
     /// check
@@ -382,19 +538,39 @@ contract Pool is IPool {
     ) private returns (int256 amount0, int256 amount1) {
         // 通过新增的流动性计算 amount0 和 amount1
         // 参考 UniswapV3 的代码
+        bytes32 pid = positionId(
+            params.owner,
+            params.tickLower,
+            params.tickUpper
+        );
+        Position storage position = positions[pid];
 
+        if (position.liquidity == 0) {
+            position.tickLower = params.tickLower;
+            position.tickUpper = params.tickUpper;
+
+            // 更新 tick 信息
+            _updateTick(params.tickLower, params.liquidityDelta, false);
+            _updateTick(params.tickUpper, params.liquidityDelta, true);
+        } else {
+            // 已有位置必须使用相同的价格区间
+            require(
+                position.tickLower == params.tickLower &&
+                    position.tickUpper == params.tickUpper,
+                "POSITION_TICK_RANGE_MISMATCH"
+            );
+        }
         amount0 = SqrtPriceMath.getAmount0Delta(
             sqrtPriceX96,
-            TickMath.getSqrtPriceAtTick(tickUpper),
+            TickMath.getSqrtPriceAtTick(params.tickUpper),
             params.liquidityDelta
         );
 
         amount1 = SqrtPriceMath.getAmount1Delta(
-            TickMath.getSqrtPriceAtTick(tickLower),
+            TickMath.getSqrtPriceAtTick(params.tickLower),
             sqrtPriceX96,
             params.liquidityDelta
         );
-        Position storage position = positions[params.owner];
 
         // 提取手续费，计算从上一次提取到当前的手续费
         uint128 tokensOwed0 = uint128(
@@ -422,11 +598,82 @@ contract Pool is IPool {
             position.tokensOwed1 += tokensOwed1;
         }
 
-        // 修改 liquidity
+        // 更新全局流动性
         liquidity = LiquidityMath.addDelta(liquidity, params.liquidityDelta);
         position.liquidity = LiquidityMath.addDelta(
             position.liquidity,
             params.liquidityDelta
+        );
+
+        // 如果完全移除流动性，清理位置
+        if (position.liquidity == 0) {
+            _updateTick(position.tickLower, -int128(position.liquidity), false);
+            _updateTick(position.tickUpper, -int128(position.liquidity), true);
+            delete positions[pid];
+        }
+    }
+
+    function _updateTick(
+        int24 _tick,
+        int128 liquidityDelta,
+        bool isUpper
+    ) private {
+        TickInfo storage info = ticks[_tick];
+        uint128 liquidityGrossBefore = info.liquidityGross;
+        uint128 liquidityGrossAfter = LiquidityMath.addDelta(
+            liquidityGrossBefore,
+            liquidityDelta
+        );
+
+        // 翻转位图状态
+        if (liquidityGrossBefore == 0) {
+            // 初始化 tick
+            _flipTick(_tick);
+        }
+
+        info.liquidityGross = liquidityGrossAfter;
+        info.liquidityNet = isUpper
+            ? info.liquidityNet - liquidityDelta
+            : info.liquidityNet + liquidityDelta;
+
+        // 清理空 tick
+        if (liquidityGrossAfter == 0) {
+            _flipTick(_tick);
+        }
+    }
+
+    function _flipTick(int24 _tick) private {
+        int16 wordPos = int16(_tick >> 8);
+        // 修复: 先转为 uint24 再取低 8 位
+        uint8 bitPos = uint8(uint24(_tick) & 0xFF);
+        uint256 mask = 1 << bitPos;
+        tickBitmap[wordPos] ^= mask;
+    }
+
+    function getPosition(
+        address owner,
+        int24 tickLower,
+        int24 tickUpper
+    )
+        external
+        view
+        override
+        returns (
+            uint128 _liquidity,
+            uint256 feeGrowthInside0LastX128,
+            uint256 feeGrowthInside1LastX128,
+            uint128 tokensOwed0,
+            uint128 tokensOwed1
+        )
+    {
+        bytes32 pid = positionId(owner, tickLower, tickUpper);
+        Position storage position = positions[pid];
+        return (
+            position.liquidity,
+            position.feeGrowthInside0LastX128,
+            position.feeGrowthInside1LastX128,
+            position.tokensOwed0,
+            position.tokensOwed1
         );
     }
 }

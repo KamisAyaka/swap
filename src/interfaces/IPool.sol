@@ -26,10 +26,6 @@ interface IPool {
 
     function fee() external view returns (uint24);
 
-    function tickLower() external view returns (int24);
-
-    function tickUpper() external view returns (int24);
-
     function sqrtPriceX96() external view returns (uint160);
 
     function tick() external view returns (int24);
@@ -49,7 +45,9 @@ interface IPool {
     function feeGrowthGlobal1X128() external view returns (uint256);
 
     function getPosition(
-        address owner
+        address owner,
+        int24 tickLower,
+        int24 tickUpper
     )
         external
         view
@@ -72,6 +70,8 @@ interface IPool {
     function mint(
         address recipient,
         uint128 amount,
+        int24 tickLower,
+        int24 tickUpper,
         bytes calldata data
     ) external returns (uint256 amount0, uint256 amount1);
 
@@ -84,6 +84,8 @@ interface IPool {
 
     function collect(
         address recipient,
+        int24 tickLower,
+        int24 tickUpper,
         uint128 amount0Requested,
         uint128 amount1Requested
     ) external returns (uint128 amount0, uint128 amount1);
@@ -96,7 +98,9 @@ interface IPool {
     );
 
     function burn(
-        uint128 amount
+        uint128 amount,
+        int24 tickLower,
+        int24 tickUpper
     ) external returns (uint256 amount0, uint256 amount1);
 
     event Swap(

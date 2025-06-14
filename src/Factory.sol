@@ -5,7 +5,9 @@ import "./interfaces/IFactory.sol";
 import "./Pool.sol";
 
 contract Factory is IFactory {
-    mapping(address => mapping(address => address[])) public pools;
+    // 三层映射（token0 => token1 => paramsHash => pool）
+    mapping(address => mapping(address => mapping(uint24 => address)))
+        public pools;
 
     Parameters public override parameters;
 
@@ -19,76 +21,38 @@ contract Factory is IFactory {
     function getPool(
         address tokenA,
         address tokenB,
-        uint32 index
+        uint24 fee
     ) external view override returns (address) {
         require(tokenA != tokenB, "IDENTICAL_ADDRESSES");
         require(tokenA != address(0) && tokenB != address(0), "ZERO_ADDRESS");
 
-        // Declare token0 and token1
-        address token0;
-        address token1;
-
-        (token0, token1) = sortToken(tokenA, tokenB);
-
-        return pools[tokenA][tokenB][index];
+        (address token0, address token1) = sortToken(tokenA, tokenB);
+        return pools[token0][token1][fee];
     }
 
     function createPool(
         address token0,
         address token1,
-        int24 tickLower,
-        int24 tickUpper,
         uint24 fee
     ) external override returns (address pool) {
         require(token0 != token1, "IDENTICAL_ADDRESSES");
+        require(fee > 0, "INVALID_FEE");
 
-        address tokenA;
-        address tokenB;
-
-        (tokenA, tokenB) = sortToken(token0, token1);
-        // 获取当前 token0 token1 的所有 pool
-        address[] memory existingPools = pools[tokenA][tokenB];
-        // 然后判断是否已经存在 tickLower tickUpper fee 相同的 pool
-        // 如果存在就直接返回
-        for (uint256 i = 0; i < existingPools.length; i++) {
-            IPool currentPool = IPool(existingPools[i]);
-
-            if (
-                currentPool.tickLower() == tickLower &&
-                currentPool.tickUpper() == tickUpper &&
-                currentPool.fee() == fee
-            ) {
-                return existingPools[i];
-            }
+        (address tokenA, address tokenB) = sortToken(token0, token1);
+        // 检查池是否已存在
+        if (pools[tokenA][tokenB][fee] != address(0)) {
+            return pools[tokenA][tokenB][fee];
         }
 
-        // 如果不存在就创建一个新的 pool
-        parameters = Parameters(
-            address(this),
-            tokenA,
-            tokenB,
-            tickLower,
-            tickUpper,
-            fee
-        );
+        parameters = Parameters(address(this), token0, token1, fee);
 
-        bytes32 salt = keccak256(
-            abi.encodePacked(tokenA, tokenB, tickLower, tickUpper, fee)
-        );
-
+        bytes32 salt = keccak256(abi.encodePacked(tokenA, tokenB, fee));
         pool = address(new Pool{salt: salt}());
-        // 然后记录到 pools 中
-        pools[tokenA][tokenB].push(pool);
+        // 记录到 pools 中
+        pools[tokenA][tokenB][fee] = pool;
+        // delete pool info
         delete parameters;
 
-        emit PoolCreated(
-            token0,
-            token1,
-            uint32(existingPools.length),
-            tickLower,
-            tickUpper,
-            fee,
-            pool
-        );
+        emit PoolCreated(token0, token1, fee, pool);
     }
 }
