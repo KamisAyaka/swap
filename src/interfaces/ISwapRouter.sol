@@ -16,7 +16,6 @@ interface ISwapRouter is ISwapCallback {
     struct ExactInputParams {
         address tokenIn;
         address tokenOut;
-        uint32[] indexPath;
         address recipient;
         uint256 deadline;
         uint256 amountIn;
@@ -31,7 +30,6 @@ interface ISwapRouter is ISwapCallback {
     struct ExactOutputParams {
         address tokenIn;
         address tokenOut;
-        uint32[] indexPath;
         address recipient;
         uint256 deadline;
         uint256 amountOut;
@@ -46,7 +44,6 @@ interface ISwapRouter is ISwapCallback {
     struct QuoteExactInputParams {
         address tokenIn;
         address tokenOut;
-        uint32[] indexPath;
         uint256 amountIn;
         uint160 sqrtPriceLimitX96;
     }
@@ -58,7 +55,6 @@ interface ISwapRouter is ISwapCallback {
     struct QuoteExactOutputParams {
         address tokenIn;
         address tokenOut;
-        uint32[] indexPath;
         uint256 amountOut;
         uint160 sqrtPriceLimitX96;
     }

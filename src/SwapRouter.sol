@@ -19,52 +19,38 @@ contract SwapRouter is ISwapRouter {
     function exactInput(
         ExactInputParams calldata params
     ) external payable override returns (uint256 amountOut) {
-        // 记录确定的输入 token 的 amount
         uint256 amountIn = params.amountIn;
-
-        // 根据 tokenIn 和 tokenOut 的大小关系，确定是从 token0 到 token1 还是从 token1 到 token0
         bool zeroForOne = params.tokenIn < params.tokenOut;
 
-        // 遍历 indexPath，获取每个 pool 的价格
-        for (uint256 i = 0; i < params.indexPath.length; i++) {
-            address poolAddress = poolManager.getPool(
-                params.tokenIn,
-                params.tokenOut,
-                params.indexPath[i]
-            );
-            // 如果 pool 不存在，则抛出错误
-            require(poolAddress != address(0), "Pool not found");
+        // 直接获取池子地址（不再需要索引）
+        address poolAddress = poolManager.getPool(
+            params.tokenIn,
+            params.tokenOut
+        );
+        require(poolAddress != address(0), "Pool not found");
 
-            IPool pool = IPool(poolAddress);
-            // TODO 交易
-            bytes memory data = abi.encode(
-                params.tokenIn,
-                params.tokenOut,
-                params.indexPath[i],
-                params.recipient == address(0) ? address(0) : msg.sender,
-                true
-            );
-            // 交易的钱统一转给本合约，最后都完成之后在 swapCallback 中打给用户
-            (int256 amount0, int256 amount1) = pool.swap(
-                params.recipient,
-                zeroForOne,
-                int256(amountIn),
-                params.sqrtPriceLimitX96,
-                data
-            );
-            // 更新 amountIn 和 amountOut
-            amountIn -= uint256(zeroForOne ? amount0 : amount1);
-            amountOut += uint256(zeroForOne ? -amount1 : -amount0);
+        IPool pool = IPool(poolAddress);
 
-            // 如果 amountIn 为 0，表示交换完成，跳出循环
-            if (amountIn == 0) {
-                break;
-            }
-        }
-        // 如果交换到的 amountOut 小于指定的最少数量 amountOutMinimum，则抛出错误
+        // 简化回调数据
+        bytes memory data = abi.encode(
+            params.tokenIn,
+            params.tokenOut,
+            params.recipient == address(0) ? address(0) : msg.sender,
+            true
+        );
+
+        (int256 amount0, int256 amount1) = pool.swap(
+            params.recipient,
+            zeroForOne,
+            int256(amountIn),
+            params.sqrtPriceLimitX96,
+            data
+        );
+
+        amountOut = uint256(zeroForOne ? -amount1 : -amount0);
         require(amountOut >= params.amountOutMinimum, "Slippage exceeded");
 
-        emit Swap(msg.sender, zeroForOne, params.amountIn, amountIn, amountOut);
+        emit Swap(msg.sender, zeroForOne, params.amountIn, 0, amountOut);
         return amountOut;
     }
 
@@ -72,67 +58,38 @@ contract SwapRouter is ISwapRouter {
     function exactOutput(
         ExactOutputParams calldata params
     ) external payable override returns (uint256 amountIn) {
-        // 记录确定的输出 token 的 amount
         uint256 amountOut = params.amountOut;
-
-        // 根据 tokenIn 和 tokenOut 的大小关系，确定是从 token0 到 token1 还是从 token1 到 token0
         bool zeroForOne = params.tokenIn < params.tokenOut;
 
-        // 遍历指定的每一个 pool
-        for (uint256 i = 0; i < params.indexPath.length; i++) {
-            address poolAddress = poolManager.getPool(
-                params.tokenIn,
-                params.tokenOut,
-                params.indexPath[i]
-            );
+        // 直接获取池子地址
+        address poolAddress = poolManager.getPool(
+            params.tokenIn,
+            params.tokenOut
+        );
+        require(poolAddress != address(0), "Pool not found");
 
-            // 如果 pool 不存在，则抛出错误
-            require(poolAddress != address(0), "Pool not found");
+        IPool pool = IPool(poolAddress);
 
-            // 获取 pool 实例
-            IPool pool = IPool(poolAddress);
-
-            // 构造 swapCallback 函数需要的参数
-            bytes memory data = abi.encode(
-                params.tokenIn,
-                params.tokenOut,
-                params.indexPath[i],
-                params.recipient == address(0) ? address(0) : msg.sender,
-                true
-            );
-
-            // 调用 pool 的 swap 函数，进行交换，并拿到返回的 token0 和 token1 的数量
-            (int256 amount0, int256 amount1) = pool.swap(
-                params.recipient,
-                zeroForOne,
-                -int256(amountOut),
-                params.sqrtPriceLimitX96,
-                data
-            );
-
-            // 更新 amountOut 和 amountIn
-            amountOut -= uint256(zeroForOne ? -amount1 : -amount0);
-            amountIn += uint256(zeroForOne ? amount0 : amount1);
-
-            // 如果 amountOut 为 0，表示交换完成，跳出循环
-            if (amountOut == 0) {
-                break;
-            }
-        }
-
-        // 如果交换到指定数量 tokenOut 消耗的 tokenIn 数量超过指定的最大值，报错
-        require(amountIn <= params.amountInMaximum, "Slippage exceeded");
-
-        // 发射 Swap 事件
-        emit Swap(
-            msg.sender,
-            zeroForOne,
-            params.amountOut,
-            amountOut,
-            amountIn
+        // 简化回调数据
+        bytes memory data = abi.encode(
+            params.tokenIn,
+            params.tokenOut,
+            params.recipient == address(0) ? address(0) : msg.sender,
+            false
         );
 
-        // 返回交换后的 amountIn
+        (int256 amount0, int256 amount1) = pool.swap(
+            params.recipient,
+            zeroForOne,
+            -int256(amountOut),
+            params.sqrtPriceLimitX96,
+            data
+        );
+
+        amountIn = uint256(zeroForOne ? amount0 : amount1);
+        require(amountIn <= params.amountInMaximum, "Slippage exceeded");
+
+        emit Swap(msg.sender, zeroForOne, params.amountOut, 0, amountIn);
         return amountIn;
     }
 
@@ -140,13 +97,11 @@ contract SwapRouter is ISwapRouter {
     function quoteExactInput(
         QuoteExactInputParams memory params
     ) external override returns (uint256 amountOut) {
-        // 因为没有实际 approve，所以这里交易会报错，我们捕获错误信息，解析需要多少 token
         try
             this.exactInput(
                 ExactInputParams({
                     tokenIn: params.tokenIn,
                     tokenOut: params.tokenOut,
-                    indexPath: params.indexPath,
                     recipient: address(0),
                     deadline: block.timestamp + 1 hours,
                     amountIn: params.amountIn,
@@ -168,7 +123,6 @@ contract SwapRouter is ISwapRouter {
                 ExactOutputParams({
                     tokenIn: params.tokenIn,
                     tokenOut: params.tokenOut,
-                    indexPath: params.indexPath,
                     recipient: address(0),
                     deadline: block.timestamp + 1 hours,
                     amountOut: params.amountOut,
@@ -192,13 +146,10 @@ contract SwapRouter is ISwapRouter {
         (
             address tokenIn,
             address tokenOut,
-            uint32 index,
             address payer,
             bool isExactInput
-        ) = abi.decode(data, (address, address, uint32, address, bool));
-        address _pool = poolManager.getPool(tokenIn, tokenOut, index);
-
-        // 检查 callback 的合约地址是否是 Pool
+        ) = abi.decode(data, (address, address, address, bool));
+        address _pool = poolManager.getPool(tokenIn, tokenOut);
         require(_pool == msg.sender, "Invalid callback caller");
 
         (uint256 amountToPay, uint256 amountReceived) = amount0Delta > 0
