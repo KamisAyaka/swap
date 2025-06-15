@@ -9,11 +9,8 @@ interface IPoolManager is IFactory {
         address pool;
         address token0;
         address token1;
-        uint32 index;
         uint24 fee;
         uint8 feeProtocol;
-        int24 tickLower;
-        int24 tickUpper;
         int24 tick;
         uint160 sqrtPriceX96;
         uint128 liquidity;
@@ -31,9 +28,6 @@ interface IPoolManager is IFactory {
     struct CreateAndInitializeParams {
         address token0;
         address token1;
-        uint24 fee;
-        int24 tickLower;
-        int24 tickUpper;
         uint160 sqrtPriceX96;
     }
 
