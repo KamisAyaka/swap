@@ -30,7 +30,8 @@ contract Factory is IFactory {
 
     function createPool(
         address token0,
-        address token1
+        address token1,
+        int24 tickSpacing
     ) external override returns (address pool) {
         require(token0 != token1, "IDENTICAL_ADDRESSES");
 
@@ -41,7 +42,7 @@ contract Factory is IFactory {
         }
 
         // 使用固定费率（不再存储 fee 到 Parameters）
-        parameters = Parameters(address(this), token0, token1);
+        parameters = Parameters(address(this), token0, token1, tickSpacing);
 
         bytes32 salt = keccak256(abi.encodePacked(tokenA, tokenB));
         pool = address(new Pool{salt: salt}());

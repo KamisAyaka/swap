@@ -51,8 +51,8 @@ contract PositionManager is IPositionManager, ERC721 {
         int24 tickUpper = params.tickUpper;
 
         uint160 sqrtPriceX96 = pool.sqrtPriceX96();
-        uint160 sqrtRatioAX96 = TickMath.getSqrtPriceAtTick(tickLower);
-        uint160 sqrtRatioBX96 = TickMath.getSqrtPriceAtTick(tickUpper);
+        uint160 sqrtRatioAX96 = TickMath.getSqrtRatioAtTick(tickLower);
+        uint160 sqrtRatioBX96 = TickMath.getSqrtRatioAtTick(tickUpper);
 
         liquidity = LiquidityAmounts.getLiquidityForAmounts(
             sqrtPriceX96,

@@ -49,7 +49,11 @@ contract PoolManager is Factory, IPoolManager {
 
         if (poolAddress == address(0)) {
             // 创建池子（只传两个代币参数）
-            poolAddress = this.createPool(params.token0, params.token1);
+            poolAddress = this.createPool(
+                params.token0,
+                params.token1,
+                params.tickSpacing
+            );
         }
 
         IPool pool = IPool(poolAddress);
